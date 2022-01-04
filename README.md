@@ -1,5 +1,6 @@
 # EPM-Pesca
 Modelo pesca versión online. Para revisión de comportamiento general de los resultados y las gáficas.
+v. 1.1.0
 
 ## Links de ejecuci[online
 

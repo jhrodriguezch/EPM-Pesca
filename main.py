@@ -7,7 +7,7 @@ import pandas as pd
 
 
 class ModeloPesca:
-    def __init__(self, wua):
+    def __init__(self, wua, NeuData):
         # FIX WUA DATE
         wua_df = wua.copy()
         wua_df['Date'] = pd.to_datetime(wua_df['Date'], format='%d-%m-%Y')
@@ -20,12 +20,42 @@ class ModeloPesca:
         self.end_date = wua_df['Date'].iloc[-1]
 
         # SAVE INTERNAL VARIABLES OBJECT
-        self.dictionary = {'N. de pasos rk4': 10}
+        self.dictionary = {'N. de pasos rk4': 10,
+                           # Vulnerabilidad
+                           'vulnerabilidad humedo': 0.216,
+                           'vulnerabilidad seco': 0.216,
+                           # Niveles de corte
+                           'Nivel humedo (m)': 1.9,
+                           'Nivel seco (m)': 1.0}
+
+        # Pre calc values
+        self.precalc_fun(NeuData)
 
         # PRINT ESCENTIAL DATA
         print('from {} to {}'.format(self.init_date, self.end_date))
 
     # MAIN FUNCTIONS
+    def precalc_fun(self, NeuData) -> None:
+        # Add neutro data
+        self.wua_df['Mes'] = [str(ii) if ii > 9 else '0'+str(ii) for ii in pd.DatetimeIndex(self.wua_df['Date']).month]
+        self.wua_df = pd.merge(self.wua_df, NeuData, how='left', on='Mes')
+
+        # Add type month
+        # 0 = Neutro
+        # 1 = Nino
+        # 2 = Nina
+        self.wua_df['type'] = 0
+        self.wua_df.loc[self.wua_df['Nivel'] <= self.dictionary['Nivel seco (m)'], 'type'] = 1
+        self.wua_df.loc[self.wua_df['Nivel'] >= self.dictionary['Nivel humedo (m)'],'type'] = 2
+
+        # Calc Vulnerability
+        self.wua_df['Vulnerabilidad'] = 1.0
+        self.wua_df.loc[self.wua_df['type'] == 1, 'Vulnerabilidad'] = self.dictionary['vulnerabilidad seco']
+        self.wua_df.loc[self.wua_df['type'] == 2, 'Vulnerabilidad'] = self.dictionary['vulnerabilidad humedo']
+
+        # Del
+        self.wua_df.drop('Mes', axis = 1, inplace = True)
+
     def prereclutas_fun(self, param: dict):
         """
         Calc prereclutas time series
@@ -42,7 +72,14 @@ class ModeloPesca:
         df['Area'] = self.wua_df['Area']
 
         # ADD DATAFRAMES CALCS
-        df['Vulnerabilidad - Reclutamiento'] = self.calc_vulnerabilidad()
+
+        #df['Vulnerabilidad - Reclutamiento'] = self.calc_vulnerabilidad()
+        df['Vulnerabilidad - Fenomeno nina'] = self.wua_df['Vulnerabilidad']
+        df.loc[self.wua_df['type'] != 2, 'Vulnerabilidad - Fenomeno nina'] = 1.0
+
+        df['Vulnerabilidad - Fenomeno nino'] = self.wua_df['Vulnerabilidad']
+        df.loc[self.wua_df['type'] != 1, 'Vulnerabilidad - Fenomeno nino'] = 1.0
+
         df['Individuos totales'] = self.wua_df['WUA'] * param['Individuos por ha']
         df['Individuos maduros'] = df['Individuos totales'] * param['Porcentaje hembras'] * param['Porcentaje maduros']
         df['Individuos reproductibles'] = df['Porcentaje'] * df['Individuos maduros']
@@ -53,6 +90,8 @@ class ModeloPesca:
         # FIX DATAFRAME
         df.drop(['Mes'], axis=1, inplace=True)
 
+        # SAVE
+        self.pes_ha = param['Individuos por ha']
         return df
 
     def servicio_ecosistemico_fun(self, abundancia_init, pre_reclut_df: pd.DataFrame, param: dict):
@@ -60,6 +99,7 @@ class ModeloPesca:
         # VARIABLES
         reclutas_lst = []
         captura_lst = []
+        muertes_desinund_lst = []
         muertes_lst = []
         abundancia_lst = [abundancia_init]
 
@@ -69,25 +109,37 @@ class ModeloPesca:
                                                               param['Peso por individuo - máximo'],
                                                               len(pre_reclut_df))
 
+        pre_reclut_df['Muert. desinun'] = (self.wua_df['Area Neutro'] - pre_reclut_df['Area']) * self.pes_ha
+        pre_reclut_df.loc[self.wua_df['type'] != 1, 'Muert. desinun'] = 0
+        pre_reclut_df.loc[pre_reclut_df['Muert. desinun'] <= 0, 'Muert. desinun'] = 0
+
         # STOCK FUNCTION
         def dabundancia_dt(abundancia_ini, flow):
-            died = abundancia_ini * flow[1] if abundancia_ini * flow[1] > 0 else 0
-            res = flow[0] - died - flow[2]
+            """
+            :param abundancia_ini: Abundancia inicial
+            :param flow: list = [reclutas, tasa de mortalidad, capturas, muertes desinundacion, dt]
+            :return: (reclutas - (abundancia + reclutas * dt) * Tasa mortalidad - muertes desinundacion)
+            """
+            died = (abundancia_ini + flow[0] * flow[4]) * flow[1] if ((abundancia_ini + flow[0] * flow[4]) *
+                                                                      flow[1] > 0) else 0
+            res = flow[0] - died - flow[2] - flow[3]
             return res
-
-        # dabundancia_dt = lambda abundancia_ini, flow: flow[0] - abundancia_ini * flow[1] - flow[2]
 
         for _, prerec_info in pre_reclut_df.iterrows():
 
             # FLOWS
-            reclutas = prerec_info['Pre-reclutas'] * prerec_info['Vulnerabilidad - Reclutamiento']
+            reclutas = prerec_info['Pre-reclutas'] * prerec_info['Vulnerabilidad - Fenomeno nina']
             captura = \
                 param['Pescadores'] * param['Captura potencial promedio'] * \
                 param['Porcentaje de captura'] * 30 / prerec_info['Peso por individuo']
-            muertes = abundancia_init * param['Tasa de mortalidad'] if abundancia_init * param['Tasa de mortalidad'] > 0 else 0
+
+            muertes_desinund = prerec_info['Muert. desinun']
+            muertes = (abundancia_init + reclutas * 1/self.dictionary['N. de pasos rk4']) * param['Tasa de mortalidad']\
+                      + muertes_desinund if (abundancia_init + reclutas * 1/self.dictionary['N. de pasos rk4']) *\
+                                            param['Tasa de mortalidad'] + muertes_desinund > 0 else 0
 
             # AUXILIAR
-            cte = [reclutas, param['Tasa de mortalidad'], captura]
+            cte = [reclutas, param['Tasa de mortalidad'], captura, 0, 1/self.dictionary['N. de pasos rk4']]
 
             # CALC
             for _ in np.arange(self.dictionary['N. de pasos rk4']):
@@ -97,6 +149,7 @@ class ModeloPesca:
             # SAVE
             reclutas_lst.append(reclutas)
             captura_lst.append(captura)
+            muertes_desinund_lst.append(muertes_desinund)
             muertes_lst.append(muertes)
             abundancia_lst.append(abundancia_init)
 
@@ -108,9 +161,12 @@ class ModeloPesca:
         servicio_ecosistemico_res['Reclutas'] = reclutas_lst
         servicio_ecosistemico_res['Capturas'] = captura_lst
         servicio_ecosistemico_res['Muertes'] = muertes_lst
+        servicio_ecosistemico_res['Muertes desinundación'] =muertes_desinund_lst
 
         self.pre_reclut_df = pre_reclut_df
 
+        # DEL
+        pre_reclut_df.drop('Muert. desinun', axis=1, inplace=True)
         return servicio_ecosistemico_res
 
     def capital_financiero_fun(self, cap_financiero_init: int, servicio_ecosistemico_res: pd.DataFrame(), param: dict):
@@ -183,26 +239,6 @@ class ModeloPesca:
             return value
         else:
             return self.__rand_norm__(promedio, min_n, max_n, std)
-
-    def calc_vulnerabilidad(self):
-        # Vulnerabilidad
-        vul_humedo: float = 0.216
-        vul_seco: float = 1.1
-
-        # Niveles de corte
-        nivel_humedo: float = 1.9
-        nivel_seco: float = 1.0
-
-        # main
-        vulnerability = []
-        for nivel in self.wua_df['Nivel'].to_list():
-            if nivel >= nivel_humedo:
-                vulnerability.append(vul_humedo)
-            elif nivel <= nivel_seco:
-                vulnerability.append(vul_seco)
-            else:
-                vulnerability.append(1.0)
-        return vulnerability
 
 
 def rk4(fun, var_ini, cte, dt):
