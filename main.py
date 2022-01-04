@@ -129,14 +129,16 @@ class ModeloPesca:
 
             # FLOWS
             reclutas = prerec_info['Pre-reclutas'] * prerec_info['Vulnerabilidad - Fenomeno nina']
-            captura = \
-                param['Pescadores'] * param['Captura potencial promedio'] * \
-                param['Porcentaje de captura'] * 30 / prerec_info['Peso por individuo']
 
             muertes_desinund = prerec_info['Muert. desinun']
             muertes = (abundancia_init + reclutas * 1/self.dictionary['N. de pasos rk4']) * param['Tasa de mortalidad']\
                       + muertes_desinund if (abundancia_init + reclutas * 1/self.dictionary['N. de pasos rk4']) *\
                                             param['Tasa de mortalidad'] + muertes_desinund > 0 else 0
+
+            captura = \
+                param['Pescadores'] * param['Captura potencial promedio'] * \
+                param['Porcentaje de captura'] * 30 / prerec_info['Peso por individuo']
+            captura = captura if captura <= abundancia_init + reclutas - muertes - muertes_desinund else abundancia_init + reclutas - muertes - muertes_desinund
 
             # AUXILIAR
             cte = [reclutas, param['Tasa de mortalidad'], captura, 0, 1/self.dictionary['N. de pasos rk4']]
